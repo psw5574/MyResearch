@@ -2,8 +2,12 @@ import tensorflow as tf
 import pandas as pd
 import numpy as np
 import glob
+import os
 
 def pre_training():
+    os.makedirs("./model/pre_trained_model", exist_ok=True)
+    os.makedirs("./loss/pre_trained_model", exist_ok=True)
+
     file_path_list = glob.glob("dataset\\*.csv")
     location_list = []
     for file_path in file_path_list:
@@ -15,16 +19,17 @@ def pre_training():
         source_location_list.remove(current_file_name)
 
         train_dataset = pd.DataFrame()
-        test_dataset = pd.DataFrame()
+        validation_dataset = pd.DataFrame()
         for source_location in source_location_list:
             current_dataset = pd.read_csv("./dataset/" + source_location + ".csv", engine="python")
 
             current_train_dataset = current_dataset.iloc[:-65083,:].dropna().reset_index(drop=True)
-            current_test_dataset = current_dataset.iloc[-65083:,:].dropna().reset_index(drop=True)
+            current_validation_dataset = current_train_dataset.sample(frac=0.1)
+            train_dataset_index = list(set(current_train_dataset.index.values.tolist()) - set(current_validation_dataset.index.values.tolist()))
+            current_train_dataset = current_train_dataset.iloc[train_dataset_index,:].reset_index(drop=True)
 
             train_dataset = pd.concat([train_dataset, current_train_dataset], axis=0)
-            test_dataset = pd.concat([test_dataset, current_test_dataset], axis=0)
-
+            validation_dataset = pd.concat([validation_dataset, current_validation_dataset], axis=0)
 
         X = tf.placeholder(tf.float32, [None, INPUT_LAYER_NODE])
         Y = tf.placeholder(tf.float32, [None, 1])
@@ -58,12 +63,12 @@ def pre_training():
         cost = tf.losses.mean_squared_error(labels=Y, predictions=Out[NUM_HIDDEN_LAYER + 1]["layers"])
         optimizer = tf.train.AdamOptimizer(LEARNING_RATE).minimize(cost)
 
-        loss_log_file = pd.DataFrame(columns=["Train_Loss", "Test_Loss"])
+        loss_log_file = pd.DataFrame(columns=["Train_Loss", "Validation_Loss"])
         sess = tf.Session()
         sess.run(tf.global_variables_initializer())
         train_batch = int(len(train_dataset) / BATCH_SIZE)
 
-        validation_cost = []
+        validation_cost_list = []
         minimum_validation_loss = np.inf
 
         saver = tf.train.Saver()
@@ -85,41 +90,47 @@ def pre_training():
             train_cost, _ = sess.run([cost, optimizer], feed_dict=feed_dict)
             total_cost += train_cost
 
-            test_cost = sess.run(cost, feed_dict={X: test_dataset.iloc[:, :-1],
-                                                  Y: np.reshape(test_dataset.iloc[:, -1].values, (len(test_dataset.iloc[:, -1].values), 1))})
+            validation_cost = sess.run(cost, feed_dict={X: validation_dataset.iloc[:, :-1],
+                                                  Y: np.reshape(validation_dataset.iloc[:, -1].values, (len(validation_dataset.iloc[:, -1].values), 1))})
 
-            loss_log_file.append({"Train_Loss": (total_cost / (train_batch + 1)), "Test_Loss": test_cost}, ignore_index=True)
+            loss_log_file.append({"Train_Loss": (total_cost / (train_batch + 1)), "Validation_Loss": validation_cost}, ignore_index=True)
 
-            print('Epoch:', '%04d' % (epoch + 1), 'train loss =', '{:.9f}'.format(total_cost / (train_batch + 1)), 'test loss =', '{:.9f}'.format(test_cost))
+            print('Epoch:', '%04d' % (epoch + 1), 'train loss =', '{:.9f}'.format(total_cost / (train_batch + 1)), 'test loss =', '{:.9f}'.format(validation_cost))
 
             if (epoch == 0) or (epoch % 10 == 0):
-                if test_cost <= minimum_validation_loss:
-                    minimum_validation_loss = test_cost
-                    saver.save(sess, "./model/proposed/"+current_file_name+".ckpt")
+                if validation_cost <= minimum_validation_loss:
+                    minimum_validation_loss = validation_cost
+                    saver.save(sess, "./model/pre_trained_model/"+current_file_name+".ckpt")
 
-            validation_cost.append(test_cost)
+            validation_cost_list.append(validation_cost)
             if epoch >= 1000:
-                if test_cost - np.mean(validation_cost[int(round(len(validation_cost) * 9 / 10)):]) >= 0.0001:
+                if validation_cost - np.mean(validation_cost_list[int(round(len(validation_cost_list) * 9 / 10)):]) >= 0.0001:
                     print("Early Stop!")
                     break
-        sess.close()
-        loss_log_file.to_csv("./loss/proposed/" + current_file_name + "_loss.csv")
         print('Learning Finished!')
+        sess.close()
 
-        sess = tf.Session()
-        saver = tf.train.Saver()
-        saver.restore(sess, "./model/proposed/"+current_file_name+".ckpt")
+        loss_log_file.to_csv("./loss/pre_trained_model/" + current_file_name + "_loss.csv")
 
         tf.reset_default_graph()
 
 def fine_tuning():
+    os.makedirs("./model/fine_tuned_model", exist_ok=True)
+    os.makedirs("./loss/fine_tuned_model", exist_ok=True)
+    os.makedirs("./result", exist_ok=True)
+
     file_path_list = glob.glob("dataset\\*.csv")
     for file_path in file_path_list:
-        current_file_name = file_path[8:-4]
+        current_file_name = file_path[len("dataset\\"):-4]
 
         current_dataset = pd.read_csv(file_path, engine="python")
 
         train_dataset = current_dataset.iloc[-128426:-65083, :].dropna().reset_index(drop=True)
+
+        validation_dataset = train_dataset.sample(frac=0.1)
+        train_dataset_index = list(set(train_dataset.index.values.tolist()) - set(validation_dataset.index.values.tolist()))
+        train_dataset = train_dataset.iloc[train_dataset_index, :].reset_index(drop=True)
+
         test_dataset = current_dataset.iloc[-65083:, :].dropna().reset_index(drop=True)
 
         X = tf.placeholder(tf.float32, [None, INPUT_LAYER_NODE])
@@ -153,14 +164,14 @@ def fine_tuning():
         cost = tf.losses.mean_squared_error(labels=Y, predictions=Out[NUM_HIDDEN_LAYER + 1]["layers"])
         optimizer = tf.train.AdamOptimizer(LEARNING_RATE).minimize(cost)
 
-        loss_log_file = pd.DataFrame(columns=["Train_Loss", "Test_Loss"])
+        loss_log_file = pd.DataFrame(columns=["Train_Loss", "Validation_Loss"])
         sess = tf.Session()
         saver = tf.train.Saver()
-        saver.restore(sess, "./model/proposed/"+current_file_name+".ckpt")
+        saver.restore(sess, "./model/fine_tuned_model/"+current_file_name+".ckpt")
 
         train_batch = int(len(train_dataset) / BATCH_SIZE)
 
-        validation_cost = []
+        validation_cost_list = []
         minimum_validation_loss = np.inf
 
         saver = tf.train.Saver()
@@ -182,30 +193,31 @@ def fine_tuning():
             train_cost, _ = sess.run([cost, optimizer], feed_dict=feed_dict)
             total_cost += train_cost
 
-            test_cost = sess.run(cost, feed_dict={X: test_dataset.iloc[:, :-1],
-                                                  Y: np.reshape(test_dataset.iloc[:, -1].values, (len(test_dataset.iloc[:, -1].values), 1))})
+            validation_cost = sess.run(cost, feed_dict={X: validation_dataset.iloc[:, :-1],
+                                                  Y: np.reshape(validation_dataset.iloc[:, -1].values, (len(validation_dataset.iloc[:, -1].values), 1))})
 
-            loss_log_file.append({"Train_Loss": (total_cost / (train_batch + 1)), "Test_Loss": test_cost}, ignore_index=True)
+            loss_log_file.append({"Train_Loss": (total_cost / (train_batch + 1)), "Validation_Loss": validation_cost}, ignore_index=True)
 
-            print('Epoch:', '%04d' % (epoch + 1), 'train loss =', '{:.9f}'.format(total_cost / (train_batch + 1)), 'test loss =', '{:.9f}'.format(test_cost))
+            print('Epoch:', '%04d' % (epoch + 1), 'train loss =', '{:.9f}'.format(total_cost / (train_batch + 1)), 'test loss =', '{:.9f}'.format(validation_cost))
 
             if (epoch == 0) or (epoch % 10 == 0):
-                if test_cost <= minimum_validation_loss:
-                    minimum_validation_loss = test_cost
-                    saver.save(sess, "./model/proposed/fine_tuning/" + current_file_name + ".ckpt")
+                if validation_cost <= minimum_validation_loss:
+                    minimum_validation_loss = validation_cost
+                    saver.save(sess, "./model/fine_tuned_model/" + current_file_name + ".ckpt")
 
-            validation_cost.append(test_cost)
+            validation_cost_list.append(validation_cost)
             if epoch >= 1000:
-                if test_cost - np.mean(validation_cost[int(round(len(validation_cost) * 9 / 10)):]) >= 0.00001:
+                if validation_cost - np.mean(validation_cost_list[int(round(len(validation_cost_list) * 9 / 10)):]) >= 0.00001:
                     print("Early Stop!")
                     break
-        sess.close()
-        loss_log_file.to_csv("./loss/proposed/fine_tuning/" + current_file_name + "_loss.csv")
         print('Learning Finished!')
+        sess.close()
+
+        loss_log_file.to_csv("./loss/fine_tuned_model/" + current_file_name + "_loss.csv")
 
         sess = tf.Session()
         saver = tf.train.Saver()
-        saver.restore(sess, "./model/proposed/fine_tuning/" + current_file_name + ".ckpt")
+        saver.restore(sess, "./model/fine_tuned_model/" + current_file_name + ".ckpt")
 
         Y_Pred = sess.run(Out[NUM_HIDDEN_LAYER + 1]["layers"], feed_dict={X: test_dataset.iloc[:, :-1],
                                                                           Y: np.reshape(test_dataset.iloc[:, -1].values,(len(test_dataset.iloc[:,-1].values), 1))})
@@ -231,3 +243,5 @@ def start():
 
     pre_training()
     fine_tuning()
+
+start()
